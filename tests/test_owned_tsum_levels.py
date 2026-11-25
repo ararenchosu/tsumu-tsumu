@@ -152,11 +152,22 @@ class OwnedTsumLevelTests(unittest.TestCase):
         forge = Mock()
         forge.last_http_status = None
         forge.last_error = None
-        forge.get_info.return_value = {
-            "retcode": 0,
-            "userinfo": {"bmedal": 490000},
-            "tsuminfo": [{"tsumid": 7, "setflg": 1, "lv": 1, "getflg": 1}],
-        }
+        forge.get_info.side_effect = [
+            {
+                "retcode": 0,
+                "userinfo": {"bmedal": 490000},
+                "tsuminfo": [{"tsumid": 7, "setflg": 1, "lv": 1, "getflg": 1}],
+            },
+            {
+                "retcode": 0,
+                "userinfo": {"bmedal": 490000},
+                "tsuminfo": [{"tsumid": 7, "setflg": 1, "lv": 1, "getflg": 1}],
+            },
+            {
+                "retcode": 0,
+                "userinfo": {"bmedal": 500000},
+            },
+        ]
         forge.game_start.return_value = {"retcode": 0, "userinfo": {"playcode": "pc"}}
         forge.game_end.return_value = {"retcode": 0, "userinfo": {"bmedal": 500000}}
         with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]):
@@ -164,6 +175,22 @@ class OwnedTsumLevelTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("メダル", text)
         self.assertEqual(forge.game_end.call_args.kwargs["medal"], 10000)
+
+    def test_medal_max_fails_when_medal_is_not_reflected(self):
+        forge = Mock()
+        forge.last_http_status = None
+        forge.last_error = None
+        forge.get_info.side_effect = [
+            {"retcode": 0, "userinfo": {"bmedal": 490000}, "tsuminfo": [{"tsumid": 7, "setflg": 1}]},
+            {"retcode": 0, "userinfo": {"bmedal": 490000}, "tsuminfo": [{"tsumid": 7, "setflg": 1}]},
+            {"retcode": 0, "userinfo": {"bmedal": 490000}},
+        ]
+        forge.game_start.return_value = {"retcode": 0, "userinfo": {"playcode": "pc"}}
+        forge.game_end.return_value = {"retcode": 0, "userinfo": {"bmedal": 490000}}
+        with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]):
+            result, text = tsum_bot.forge_sync(medal_max=500000, sess={"userid": "test"}, f=forge)
+        self.assertIsNone(result)
+        self.assertIn("反映を確認できません", text)
 
     def test_medal_out_of_range_is_rejected(self):
         forge = Mock()

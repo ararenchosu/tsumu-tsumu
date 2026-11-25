@@ -2240,12 +2240,15 @@ def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsum
         return max_owned_tsum_levels(f, sess, progress, owned_progress)
 
     medal_value = 5 if medal is None else _to_int(medal, 5)
+    current_medal = None
+    target_medal_cap = None
     if medal_max is not None:
         cap = _to_int(medal_max, MEDAL_CAP)
         if cap < 1:
             return None, "メダルMAXの上限値が不正です。"
         if cap > MEDAL_CAP:
             cap = MEDAL_CAP
+        target_medal_cap = cap
         info_for_medal = f.get_info()
         if not isinstance(info_for_medal, dict):
             return None, describe_tsum_api_failure("メダル情報取得", info_for_medal, f)
@@ -2500,6 +2503,15 @@ def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsum
                         vanishcnt=vanishcnt)
         if not isinstance(r2, dict) or r2.get("retcode") != 0:
             return None, "送信に失敗しました。もう一度試してください。"
+    if medal_max is not None:
+        verify_info = f.get_info()
+        verified_medal = _to_int((r2.get("userinfo") or {}).get("bmedal"))
+        if isinstance(verify_info, dict) and str(verify_info.get("retcode")) == "0":
+            verified_medal = _to_int((verify_info.get("userinfo") or {}).get("bmedal"), verified_medal)
+        if verified_medal <= _to_int(current_medal):
+            goal = _to_int(target_medal_cap)
+            return None, (f"メダルの反映を確認できませんでした（現在 {verified_medal:,} / 目標 {goal:,}）。"
+                          "時間をおいてから再度お試しください。")
     if progress:
         progress.update(3, "結果を反映しています", force=True)
     ui = r2.get("userinfo") or {}
