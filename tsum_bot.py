@@ -2007,6 +2007,55 @@ def select_play_tsumids(forge, requested_tsumid=None):
         return candidates[:20], info, None
     return None, info, "使用できるツムが見つかりませんでした。ゲームを開いてマイツムをセットしてから、もう一度お試しください。"
 
+def max_owned_tsum_levels(forge, sess, progress=None, owned_progress=None):
+    info = forge.get_info()
+    if not isinstance(info, dict) or str(info.get("retcode")) != "0" or not isinstance(info.get("tsuminfo"), list):
+        return None, describe_tsum_api_failure("所持ツム情報取得", info, forge, missing_data=True)
+
+    owned = {}
+    for row in info["tsuminfo"]:
+        if not isinstance(row, dict):
+            return None, "所持ツム情報を読み取れませんでした。もう一度お試しください。"
+        if not _is_owned_tsum(row):
+            continue
+        tid = _to_int(row.get("tsumid"))
+        if tid <= 0:
+            return None, "所持ツムのIDを読み取れませんでした。もう一度お試しください。"
+        owned[tid] = row
+    if not owned:
+        return None, "所持ツムが見つかりませんでした。"
+
+    pending = sum(_to_int(row.get("lv") or row.get("level")) < 50 for row in owned.values())
+    if owned_progress and not owned_progress.confirm(len(owned), pending, info):
+        return None, "同意が得られなかったため、レベル上げを開始しませんでした。"
+
+    completed = 0
+    completed_work = 0
+    total = len(owned)
+    for tid, row in owned.items():
+        if progress:
+            progress.update(2, f"所持ツムのレベルを上げています（{completed}/{total}）")
+        if _to_int(row.get("lv") or row.get("level")) < 50:
+            def on_play():
+                if owned_progress:
+                    try:
+                        current = forge.get_info()
+                    except (requests.exceptions.RequestException, ValueError) as e:
+                        print(f"[owned progress] ハート情報取得失敗: {type(e).__name__}: {e}")
+                        current = None
+                    owned_progress.update(completed, completed_work, tid, current)
+            result, text = forge_sync(tsum_lv=tid, sess=sess, f=forge,
+                                      level_update=on_play if owned_progress else None)
+            if result is None:
+                return None, (f"所持ツムのレベルMAXを中断しました（完了 {completed}/{total}、"
+                              f"ツムID: {tid}）。\n{text}\n"
+                              "反映済みのツムは再実行時にスキップします。")
+            completed_work += 1
+        completed += 1
+        if owned_progress:
+            owned_progress.update(completed, completed_work, tid)
+    return {"status": "done", "count": completed}, f"所持ツム {completed}体をレベルMAXにしました。"
+
 def heart_count_from_info(info):
     ui = (info.get("userinfo") or {}) if isinstance(info, dict) else {}
     return _to_int(ui.get("bheart")) + _to_int(ui.get("pheart"))
@@ -2104,9 +2153,10 @@ def resolve_gacha_id(f, kind, fallback):
     return int(fallback), "fallback"
 
 
-def forge_sync(score=None, coin=None, exp=None, medal=5, tsumid=860, tsum_lv=None, box=None,
+def forge_sync(score=None, coin=None, exp=None, medal=5, tsumid=860, tsum_lv=None, tsum_all_lv=None, box=None,
                login_id=None, password=None, captcha_solver=None, proxy=None, sess=None, f=None,
-               pin_notice=None, gacha_full=None, on_login=None, stage_box=None, progress=None):
+               pin_notice=None, gacha_full=None, on_login=None, stage_box=None, progress=None,
+               owned_progress=None, level_update=None):
     # stage_box: 失敗がログイン段階か実行段階かを呼び出し元に伝えるための箱
     if stage_box is None:
         stage_box = {}
@@ -2186,6 +2236,9 @@ def forge_sync(score=None, coin=None, exp=None, medal=5, tsumid=860, tsum_lv=Non
     if progress:
         progress.update(1, "ゲームデータを取得しています", force=True)
 
+    if tsum_all_lv is not None:
+        return max_owned_tsum_levels(f, sess, progress, owned_progress)
+
     if tsum_lv is not None:
         tid = int(tsum_lv)
         if tid == 0:
@@ -2199,7 +2252,8 @@ def forge_sync(score=None, coin=None, exp=None, medal=5, tsumid=860, tsum_lv=Non
                 return None, "セット中のマイツムが見つかりませんでした。ゲームでマイツムをセットしてから、もう一度お試しください。"
         if progress:
             progress.update(2, "ツムのレベルを上げています", force=True)
-        res = f.max_tsum_level(tid, target=50, min_heart=10, sleep_s=0.3, log=_dbg)
+        options = {"on_play": level_update} if level_update else {}
+        res = f.max_tsum_level(tid, target=50, min_heart=10, sleep_s=0.3, log=_dbg, **options)
         st = res.get("status")
         # 失敗系はデバッグログに詳細(サーバー応答含む)を残す
         if st != "done":
@@ -2444,6 +2498,151 @@ def forge_sync(score=None, coin=None, exp=None, medal=5, tsumid=860, tsum_lv=Non
     lines.append("またのご利用をお待ちしております。")
     return r2, "\n".join(lines)
 
+class OwnedTsumConsentView(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.approved = False
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("依頼した本人のみ操作できます。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="同意する", style=discord.ButtonStyle.success)
+    async def approve(self, interaction, button):
+        await interaction.response.edit_message(content="同意を受け付けました。", view=None)
+        self.approved = True
+        self.stop()
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(content="キャンセルしました。", view=None)
+        self.stop()
+
+
+async def request_owned_consent(channel, user, description):
+    view = OwnedTsumConsentView(user.id)
+    message = await channel.send(embed=discord.Embed(
+        title="作業前の確認", description=description, color=0xf1c40f), view=view)
+    timed_out = await view.wait()
+    if timed_out:
+        try:
+            await message.edit(content="確認が期限切れになりました。", view=None)
+        except discord.HTTPException as e:
+            print(f"[owned consent] 期限切れ表示の更新失敗: {e}")
+    return view.approved
+
+
+_NO_HEART_SAMPLE = object()
+
+
+class OwnedTsumProgress:
+    def __init__(self, channel, user, loop):
+        self.channel = channel
+        self.user = user
+        self.loop = loop
+        self.message = None
+        self.finished = False
+        self.edit_lock = asyncio.Lock()
+        self.last_edit = 0.0
+        self.last_hearts = None
+        self.used_hearts = 0
+        self.heart_known = True
+
+    def confirm(self, total, pending, info):
+        self.total = total
+        self.pending = pending
+        self.completed = 0
+        self.completed_work = 0
+        self.current_id = None
+        self.last_hearts = heart_count_from_info(info) if heart_info_is_reliable(info) else None
+        self.heart_known = self.last_hearts is not None
+        future = asyncio.run_coroutine_threadsafe(self._confirm_and_start(), self.loop)
+        try:
+            return future.result(timeout=330)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            print("[owned consent] 確認が時間内に完了しませんでした。")
+            return False
+
+    async def _confirm_and_start(self):
+        hearts = str(self.last_hearts) if self.last_hearts is not None else "不明"
+        description = (
+            f"所持ツム: {self.total}体（レベル50未満: {self.pending}体）\n"
+            f"現在のハート: {hearts}\n"
+            "必要ハート数: 不明（各ツムの開始時に10個以上必要）\n"
+            "所要時間: 不明\n"
+            "プレイでハート、上限開放でコインを消費します。"
+            "途中で不足した場合は中断します。\n5分以内に選択してください。"
+        )
+        if not await request_owned_consent(self.channel, self.user, description):
+            return False
+        self.started = time.monotonic()
+        self.message = await self.channel.send(embed=self._embed())
+        return True
+
+    def _embed(self, status="実行中"):
+        percent = self.completed * 100 // self.total
+        filled = percent // 10
+        elapsed = max(0, time.monotonic() - self.started)
+        remaining_work = max(0, self.pending - self.completed_work)
+        if remaining_work == 0:
+            remaining = "0分"
+        elif self.completed_work:
+            seconds = elapsed / self.completed_work * remaining_work
+            remaining = f"約{max(1, int((seconds + 59) // 60))}分"
+        else:
+            remaining = "不明（実績を計測中）"
+        hearts = f"{self.used_hearts}個（残数差分からの推定）" if self.heart_known else "不明"
+        return discord.Embed(
+            title=f"所持ツムレベルMAX {status}",
+            description=(f"`{'▓' * filled}{'░' * (10 - filled)}` {percent}%\n"
+                         f"完了: {self.completed}/{self.total}体\n"
+                         f"残り時間: {remaining}\n"
+                         f"使用したハート: {hearts}\n"
+                         "※ハートの補充や自然回復があると推定値は不正確になります。"),
+            color=0x2ecc71 if status == "完了" else 0xe74c3c if status == "中断" else 0x3498db)
+
+    def update(self, completed, completed_work, tid, info=_NO_HEART_SAMPLE):
+        self.completed = completed
+        self.completed_work = completed_work
+        self.current_id = tid
+        if info is not _NO_HEART_SAMPLE:
+            if not heart_info_is_reliable(info):
+                self.heart_known = False
+                self.last_hearts = None
+            else:
+                hearts = heart_count_from_info(info)
+                if self.last_hearts is not None:
+                    self.used_hearts += max(0, self.last_hearts - hearts)
+                self.last_hearts = hearts
+        now = time.monotonic()
+        if now - self.last_edit >= 5:
+            self.last_edit = now
+            asyncio.run_coroutine_threadsafe(self._edit(self._embed()), self.loop)
+
+    async def _edit(self, embed):
+        async with self.edit_lock:
+            if self.message is None or self.finished:
+                return
+            try:
+                await self.message.edit(embed=embed)
+            except discord.HTTPException as e:
+                print(f"[owned progress] 更新失敗: {e}")
+
+    async def finish(self, ok):
+        if self.message is None:
+            return
+        async with self.edit_lock:
+            self.finished = True
+            try:
+                await self.message.edit(embed=self._embed("完了" if ok else "中断"))
+            except discord.HTTPException as e:
+                print(f"[owned progress] 最終更新失敗: {e}")
+
+
 async def _do_forge(channel, user, login_id, password, stage_box=None, **kw):
     if stage_box is None:
         stage_box = {}
@@ -2464,6 +2663,7 @@ async def _do_forge(channel, user, login_id, password, stage_box=None, **kw):
     result_obj = None
     text = ""
     progress = None
+    owned_progress = None
     # 実行中であることをディスクに残す。落ちても「中断された依頼」が分かるように。
     _job_id = _job_key(channel, user)
     _job_start(_job_id, channel, user, kw)
@@ -2473,8 +2673,11 @@ async def _do_forge(channel, user, login_id, password, stage_box=None, **kw):
     try:
         loop = asyncio.get_running_loop()
         # 進行状況の表示(数分かかるので、今どこかを見せる)
-        progress = ProgressReporter(channel, loop)
-        await progress._start()
+        if kw.get("tsum_all_lv") is not None:
+            owned_progress = OwnedTsumProgress(channel, user, loop)
+        else:
+            progress = ProgressReporter(channel, loop)
+            await progress._start()
         captcha_solver = make_solver(channel, user, loop)
         pin_notice = make_pin_notice(channel, loop)
         # 出口IPの選定はTor経由の通信を伴い数十秒かかりうる。イベントループ上で
@@ -2491,6 +2694,7 @@ async def _do_forge(channel, user, login_id, password, stage_box=None, **kw):
                 pin_notice=pin_notice,
                 stage_box=stage_box,
                 progress=progress,
+                owned_progress=owned_progress,
                 **kw,
             ),
         )
@@ -2508,6 +2712,8 @@ async def _do_forge(channel, user, login_id, password, stage_box=None, **kw):
         try:
             if progress:
                 progress.finish(ok=result_obj is not None)
+            if owned_progress:
+                await owned_progress.finish(ok=result_obj is not None)
         except Exception:
             pass
         _job_end(_job_id)                    # 正常・異常どちらでも記録を消す
@@ -2580,7 +2786,8 @@ def _save_guest_transfer(sess, old_migration_id, new_id, new_pw):
 
 
 def forge_sync_guest(migration_id, password, score=None, coin=None, exp=None, medal=5,
-                     tsumid=860, tsum_lv=None, box=None, proxy=None, gacha_full=None, **_ignore):
+                     tsumid=860, tsum_lv=None, tsum_all_lv=None, box=None, proxy=None, gacha_full=None,
+                     owned_progress=None, **_ignore):
     if not migration_id or not password:
         return None, "引き継ぎ番号とパスワードを入力してください。", {"moved": False}
     proxies = _proxies_dict(proxy)
@@ -2604,8 +2811,8 @@ def forge_sync_guest(migration_id, password, score=None, coin=None, exp=None, me
             f = Forge(userid=sess["userid"], hashv=sess.get("hash", ""), checkval=sess.get("checkval", ""), proxy=proxy)
             f.get_public_key()
             result_obj, text = forge_sync(score=score, coin=coin, exp=exp, medal=medal, tsumid=tsumid,
-                                          tsum_lv=tsum_lv, box=box, proxy=proxy, sess=sess, f=f,
-                                          gacha_full=gacha_full)
+                                          tsum_lv=tsum_lv, tsum_all_lv=tsum_all_lv, box=box, proxy=proxy, sess=sess, f=f,
+                                          gacha_full=gacha_full, owned_progress=owned_progress)
     except Exception:
         traceback.print_exc()
         try:
@@ -2661,17 +2868,30 @@ async def _do_forge_guest(channel, user, migration_id, password, **kw):
     result_obj = None
     text = ""
     info = {"moved": False}
+    owned_progress = None
     _job_id = _job_key(channel, user)
     _job_start(_job_id, channel, user, kw)
     # ここも同じ理由で try の中に入れる（ロックを取りっぱなしにしない）
     try:
+        if kw.get("tsum_all_lv") is not None:
+            approved = await request_owned_consent(
+                channel, user,
+                "ゲストアカウントを引き継いで所持ツムを確認します。"
+                "引き継ぎ後は元の引き継ぎ情報が使えなくなり、新しい情報を発行します。\n"
+                "レベル上げの前にもう一度確認します。5分以内に選択してください。")
+            if not approved:
+                await channel.send(embed=notice_embed("同意が得られなかったため、引き継ぎを開始しませんでした。"))
+                return False, "引き継ぎをキャンセルしました。", info
         await channel.send(embed=discord.Embed(description="引き継ぎ中です...", color=0x3498db))
         loop = asyncio.get_running_loop()
+        if kw.get("tsum_all_lv") is not None:
+            owned_progress = OwnedTsumProgress(channel, user, loop)
         # ここも同じ理由で別スレッドに逃がす(イベントループを止めない)
         proxy = await loop.run_in_executor(None, _unique_game_proxy)
         result_obj, text, info = await loop.run_in_executor(
             None,
-            functools.partial(forge_sync_guest, migration_id, password, proxy=proxy, **kw),
+            functools.partial(forge_sync_guest, migration_id, password, proxy=proxy,
+                              owned_progress=owned_progress, **kw),
         )
     except Exception:
         print("[forge_guest] error")
@@ -2679,6 +2899,8 @@ async def _do_forge_guest(channel, user, migration_id, password, **kw):
         info = {"moved": True}
         text = "エラーが発生しました。お手数ですが管理者にご連絡ください。"
     finally:
+        if owned_progress:
+            await owned_progress.finish(ok=result_obj is not None)
         _job_end(_job_id)
         if account_lock.locked():
             account_lock.release()
@@ -2795,6 +3017,7 @@ DEFAULT_MENU_PRICES = {
     "level_max": 100,
     "coin_max": 100,
     "tsum_lv": 100,
+    "tsum_all_lv": 0,
     "box": 200,
     "premium": 200,
     "coin": 100,
@@ -2813,6 +3036,7 @@ MENU_ACTIONS = [
     ("score",   "スコア指定"),
     ("score_max", "スコアMAX"),
     ("tsum_lv",   "ツムレベルMAX"),
+    ("tsum_all_lv", "所持ツム全体レベルMAX"),
     ("box",       "セレクトBOX完売"),
     ("premium",   "プレミアム完売"),
     ("guest_create", "ゲストアカウント生成"),
@@ -2839,6 +3063,8 @@ def menu_description():
         "スコアMAXにします",
         f"**ツムレベルMAX - ¥{menu_price('tsum_lv'):,}**",
         "セット中のツムをレベル50",
+        f"**所持ツム全体レベルMAX - ¥{menu_price('tsum_all_lv'):,}**",
+        "所持ツムを全てレベル50（ハート・コインを消費）",
         f"**セレクトBOX完売 - ¥{menu_price('box'):,}**",
         "完売まで",
         f"**プレミアム完売 - ¥{menu_price('premium'):,}**",
@@ -3173,6 +3399,8 @@ def ticket_link(ch):
     return getattr(ch, "mention", None) or "このチャット"
 
 def ticket_request_text(action, val):
+    if action == "tsum_all_lv":
+        return "所持ツム全体レベルMAX"
     if action == "tsum_lv":
         return "ツムlvMAX\nセット中のツム"
     if action == "box":
@@ -3261,6 +3489,8 @@ async def send_ticket_header(channel, user, action, val, amount, paypay_link):
     await channel.send(embed=ticket_embed(user, action, val, amount, paypay_link), view=TicketView(user.id))
 
 def ticket_thread_name(action, val):
+    if action == "tsum_all_lv":
+        return "所持ツム全体レベルMAX"
     if action == "box":
         return "セレクトBOX完売"
     if action == "gacha_full":
@@ -3811,6 +4041,8 @@ class MenuSelect(discord.ui.Select):
                        AccountBeforeTicketModal(a, v, m, k))
         elif key == "tsum_lv":
             factory = lambda m=menu_msg: AccountBeforeTicketModal("tsum_lv", 0, m, "tsum_lv")
+        elif key == "tsum_all_lv":
+            factory = lambda m=menu_msg: AccountBeforeTicketModal("tsum_all_lv", 1, m, "tsum_all_lv")
         elif key == "box":
             factory = lambda m=menu_msg: AccountBeforeTicketModal("box", DEFAULT_SELECT_BOX_ID, m, "box")
         elif key == "premium":

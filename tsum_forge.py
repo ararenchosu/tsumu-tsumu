@@ -603,7 +603,7 @@ class Forge:
         r = self.resources(info)
         return (r.get("bheart") or 0) + (r.get("pheart") or 0)
 
-    def max_tsum_level(self, tsumid, target=50, min_heart=10, sleep_s=0.6, max_iter=40, log=print):
+    def max_tsum_level(self, tsumid, target=50, min_heart=10, sleep_s=0.6, max_iter=40, log=print, on_play=None):
         info0 = self.get_info()
         if not isinstance(info0, dict):
             return {"status": "network_error"}
@@ -617,6 +617,8 @@ class Forge:
         last_lv = None
         for _ in range(max_iter):
             r = self.level_tsum_once(tsumid)
+            if on_play:
+                on_play()
             if not isinstance(r, dict) or r.get("retcode") != 0:
                 _now = self.get_info()
                 if info_has_heart_data(_now):
@@ -625,6 +627,8 @@ class Forge:
                         return {"status": "heart_ran_out", "lv": last_lv}
                 time.sleep(1.5)
                 r = self.level_tsum_once(tsumid)
+                if on_play:
+                    on_play()
                 if not isinstance(r, dict) or r.get("retcode") != 0:
                     return {"status": "level_error", "lv": last_lv,
                             "resp": str(r if r is not None else self.last_gs_response)[:200],
