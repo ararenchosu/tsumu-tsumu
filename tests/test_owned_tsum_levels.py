@@ -148,6 +148,29 @@ class OwnedTsumLevelTests(unittest.TestCase):
         self.assertEqual(result["status"], "done")
         self.assertEqual(callback.call_count, 2)
 
+    def test_medal_max_uses_gap_to_cap(self):
+        forge = Mock()
+        forge.last_http_status = None
+        forge.last_error = None
+        forge.get_info.return_value = {
+            "retcode": 0,
+            "userinfo": {"bmedal": 490000},
+            "tsuminfo": [{"tsumid": 7, "setflg": 1, "lv": 1, "getflg": 1}],
+        }
+        forge.game_start.return_value = {"retcode": 0, "userinfo": {"playcode": "pc"}}
+        forge.game_end.return_value = {"retcode": 0, "userinfo": {"bmedal": 500000}}
+        with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]):
+            result, text = tsum_bot.forge_sync(medal_max=500000, sess={"userid": "test"}, f=forge)
+        self.assertIsNotNone(result)
+        self.assertIn("メダル", text)
+        self.assertEqual(forge.game_end.call_args.kwargs["medal"], 10000)
+
+    def test_medal_out_of_range_is_rejected(self):
+        forge = Mock()
+        result, text = tsum_bot.forge_sync(medal=500001, sess={"userid": "test"}, f=forge)
+        self.assertIsNone(result)
+        self.assertIn("1〜500,000", text)
+
 
 class OwnedTsumMenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_menu_opens_free_account_modal_for_all_owned_tsums(self):
