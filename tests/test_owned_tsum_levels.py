@@ -200,7 +200,42 @@ class OwnedTsumLevelTests(unittest.TestCase):
         forge = Mock()
         result, text = tsum_bot.forge_sync(medal=500001, sess={"userid": "test"}, f=forge)
         self.assertIsNone(result)
-        self.assertIn("1〜500,000", text)
+        self.assertIn("0〜500,000", text)
+
+    def test_full_stack_runs_steps_in_order(self):
+        forge = Mock()
+        calls = []
+
+        def _step(**kwargs):
+            calls.append(kwargs)
+            return {"status": "done"}, "ok"
+
+        with patch.object(tsum_bot, "forge_sync", side_effect=_step), \
+             patch.object(tsum_bot, "max_owned_tsum_levels", return_value=({"status": "done", "count": 3}, "ok")):
+            result, text = tsum_bot.run_full_stack_account(forge, {"userid": "test"})
+
+        self.assertEqual(result["status"], "done")
+        self.assertIn("全盛りアカウント作成が完了しました", text)
+        action_order = []
+        for call in calls:
+            for key in ("coin", "exp", "box", "gacha_full", "ruby"):
+                if key in call:
+                    action_order.append(key)
+                    break
+        self.assertEqual(action_order, ["coin", "exp", "box", "coin", "gacha_full", "ruby"])
+        self.assertTrue(all(c["medal"] == 0 for c in calls))
+
+    def test_full_stack_reports_heart_shortage_after_ruby_step(self):
+        forge = Mock()
+
+        with patch.object(tsum_bot, "forge_sync", return_value=({"status": "done"}, "ok")), \
+             patch.object(tsum_bot, "max_owned_tsum_levels",
+                          return_value=(None, "ハートが足りないため中断しました")):
+            result, text = tsum_bot.run_full_stack_account(forge, {"userid": "test"})
+
+        self.assertIsNone(result)
+        self.assertIn("途中まで完了", text)
+        self.assertIn("ルビーは補充済み", text)
 
     def test_ruby_value_is_sent_to_game_end(self):
         forge = Mock()
@@ -219,11 +254,28 @@ class OwnedTsumLevelTests(unittest.TestCase):
         self.assertEqual(forge.game_end.call_args.kwargs["ruby"], 34)
         self.assertIn("ルビー", text)
 
+    def test_ruby_is_not_sent_when_not_specified(self):
+        forge = Mock()
+        forge.last_http_status = None
+        forge.last_error = None
+        forge.get_info.return_value = {
+            "retcode": 0,
+            "userinfo": {"bmedal": 1000},
+            "tsuminfo": [{"tsumid": 7, "setflg": 1, "lv": 1, "getflg": 1}],
+        }
+        forge.game_start.return_value = {"retcode": 0, "userinfo": {"playcode": "pc"}}
+        forge.game_end.return_value = {"retcode": 0, "userinfo": {"bmedal": 1005}}
+        with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]):
+            result, _ = tsum_bot.forge_sync(medal=5, sess={"userid": "test"}, f=forge)
+        self.assertIsNotNone(result)
+        self.assertNotIn("ruby", forge.game_end.call_args.kwargs)
+
 
 class OwnedTsumMenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_menu_actions_use_ruby_instead_of_medal(self):
         keys = [key for key, _ in tsum_bot.MENU_ACTIONS]
         self.assertIn("ruby", keys)
+        self.assertIn("full_stack", keys)
         self.assertNotIn("medal", keys)
         self.assertNotIn("medal_max", keys)
 
