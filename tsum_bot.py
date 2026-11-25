@@ -1967,6 +1967,26 @@ def _to_int(value, default=0):
     except (TypeError, ValueError):
         return default
 
+def _confirm_medal_reflected(forge, baseline_medal):
+    baseline = _to_int(baseline_medal)
+    attempts = _to_int(CONFIG.get("medal_verify_attempts"), 4)
+    wait_s = float(CONFIG.get("medal_verify_wait_sec", 0.8))
+    if attempts < 1:
+        attempts = 1
+    if wait_s < 0:
+        wait_s = 0.0
+
+    verified = baseline
+    for i in range(attempts):
+        info = forge.get_info()
+        if isinstance(info, dict) and str(info.get("retcode")) == "0":
+            verified = max(verified, _to_int((info.get("userinfo") or {}).get("bmedal"), verified))
+            if verified > baseline:
+                return verified
+        if i < attempts - 1 and wait_s > 0:
+            time.sleep(wait_s)
+    return verified
+
 def _is_owned_tsum(row):
     if not isinstance(row, dict):
         return False
@@ -2153,7 +2173,7 @@ def resolve_gacha_id(f, kind, fallback):
     return int(fallback), "fallback"
 
 
-def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsumid=860, tsum_lv=None, tsum_all_lv=None, box=None,
+def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, ruby=None, tsumid=860, tsum_lv=None, tsum_all_lv=None, box=None,
                login_id=None, password=None, captcha_solver=None, proxy=None, sess=None, f=None,
                pin_notice=None, gacha_full=None, on_login=None, stage_box=None, progress=None,
                owned_progress=None, level_update=None):
@@ -2240,6 +2260,9 @@ def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsum
         return max_owned_tsum_levels(f, sess, progress, owned_progress)
 
     medal_value = 5 if medal is None else _to_int(medal, 5)
+    ruby_value = None if ruby is None else _to_int(ruby)
+    if ruby is not None and not (1 <= ruby_value <= RUBY_CAP):
+        return None, f"ルビー指定は 1〜{RUBY_CAP:,} の範囲で入力してください。"
     current_medal = None
     target_medal_cap = None
     if medal_max is not None:
@@ -2475,6 +2498,8 @@ def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsum
                     break
             ge = dict(score=score if score is not None else 95000, coin=61,
                       medal=medal_value, exp=120, vanishcnt=vanishcnt)
+            if ruby_value is not None:
+                ge["ruby"] = ruby_value
             ge[chunk_field] = send
             rr = f.game_end(pc, **ge)
             pc = None
@@ -2499,19 +2524,18 @@ def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsum
         r2 = f.game_end(playcode,
                         score=score if score is not None else 95000,
                         coin=coin if coin is not None else 61,
-                        medal=medal_value, exp=120,
+                        medal=medal_value, ruby=ruby_value, exp=120,
                         vanishcnt=vanishcnt)
         if not isinstance(r2, dict) or r2.get("retcode") != 0:
             return None, "送信に失敗しました。もう一度試してください。"
     if medal_max is not None:
-        verify_info = f.get_info()
-        verified_medal = _to_int((r2.get("userinfo") or {}).get("bmedal"))
-        if isinstance(verify_info, dict) and str(verify_info.get("retcode")) == "0":
-            verified_medal = _to_int((verify_info.get("userinfo") or {}).get("bmedal"), verified_medal)
+        verified_medal = _to_int((r2.get("userinfo") or {}).get("bmedal"), _to_int(current_medal))
+        if verified_medal <= _to_int(current_medal):
+            verified_medal = _confirm_medal_reflected(f, current_medal)
         if verified_medal <= _to_int(current_medal):
             goal = _to_int(target_medal_cap)
             return None, (f"メダルの反映を確認できませんでした（現在 {verified_medal:,} / 目標 {goal:,}）。"
-                          "時間をおいてから再度お試しください。")
+                          "数秒待って再確認しても変化がないため、時間をおいてから再度お試しください。")
     if progress:
         progress.update(3, "結果を反映しています", force=True)
     ui = r2.get("userinfo") or {}
@@ -2529,6 +2553,9 @@ def forge_sync(score=None, coin=None, exp=None, medal=None, medal_max=None, tsum
         lines.append(f"メダル: 目標まで +{medal_value:,}（現在 {now_medal:,}）")
     elif medal is not None:
         lines.append(f"メダル: +{medal_value:,}")
+    if ruby is not None:
+        now_ruby = _to_int(ui.get("bruby"))
+        lines.append(f"ルビー: +{ruby_value:,}（現在 {now_ruby:,}）")
     if exp is not None:
         lines.append("プレイヤーレベルMAX" if credited >= target else f"経験値を付与しました（{credited:,}）")
     lines.append("完了しました。")
@@ -2822,7 +2849,7 @@ def _save_guest_transfer(sess, old_migration_id, new_id, new_pw):
         traceback.print_exc()
 
 
-def forge_sync_guest(migration_id, password, score=None, coin=None, exp=None, medal=None, medal_max=None,
+def forge_sync_guest(migration_id, password, score=None, coin=None, exp=None, medal=None, medal_max=None, ruby=None,
                      tsumid=860, tsum_lv=None, tsum_all_lv=None, box=None, proxy=None, gacha_full=None,
                      owned_progress=None, **_ignore):
     if not migration_id or not password:
@@ -2847,7 +2874,7 @@ def forge_sync_guest(migration_id, password, score=None, coin=None, exp=None, me
         else:
             f = Forge(userid=sess["userid"], hashv=sess.get("hash", ""), checkval=sess.get("checkval", ""), proxy=proxy)
             f.get_public_key()
-            result_obj, text = forge_sync(score=score, coin=coin, exp=exp, medal=medal, medal_max=medal_max, tsumid=tsumid,
+            result_obj, text = forge_sync(score=score, coin=coin, exp=exp, medal=medal, medal_max=medal_max, ruby=ruby, tsumid=tsumid,
                                           tsum_lv=tsum_lv, tsum_all_lv=tsum_all_lv, box=box, proxy=proxy, sess=sess, f=f,
                                           gacha_full=gacha_full, owned_progress=owned_progress)
     except Exception:
@@ -3044,9 +3071,9 @@ MAX_PRESETS = {
     "score_max": ("score", 2_147_483_647),
     "level_max": ("exp", 100_000_000),
     "coin_max":  ("coin", 200_000_000),
-    "medal_max": ("medal_max", 500_000),
 }
 MEDAL_CAP = 500_000
+RUBY_CAP = 99_999
 DEFAULT_SELECT_BOX_ID = int(CONFIG.get("select_box_id", 12006012))
 DEFAULT_PREMIUM_GACHA_ID = int(CONFIG.get("premium_gacha_id", 12006007))
 PREMIUM_FILL_COINS = int(CONFIG.get("premium_fill_coins", 160_000_000))
@@ -3055,13 +3082,12 @@ DEFAULT_MENU_PRICES = {
     "score_max": 100,
     "level_max": 100,
     "coin_max": 100,
-    "medal_max": 100,
     "tsum_lv": 100,
     "tsum_all_lv": 0,
     "box": 200,
     "premium": 200,
     "coin": 100,
-    "medal": 100,
+    "ruby": 100,
     "score": 100,
     "guest_create": 0,
 }
@@ -3073,8 +3099,7 @@ MENU_PRICES = {
 MENU_ACTIONS = [
     ("coin",    "コイン指定"),
     ("coin_max",  "コインMAX"),
-    ("medal",   "メダル指定"),
-    ("medal_max", "メダルMAX"),
+    ("ruby",    "ルビー指定"),
     ("level_max", "プレイヤーレベルMAX"),
     ("score",   "スコア指定"),
     ("score_max", "スコアMAX"),
@@ -3098,10 +3123,8 @@ def menu_description():
         "0〜2億枚まで指定可能",
         f"**コインMAX - ¥{menu_price('coin_max'):,}**",
         "コインを2億枚にします",
-        f"**メダル指定 - ¥{menu_price('medal'):,}**",
-        "1〜500,000まで指定可能",
-        f"**メダルMAX - ¥{menu_price('medal_max'):,}**",
-        "所持メダルを50万まで増やします",
+        f"**ルビー指定 - ¥{menu_price('ruby'):,}**",
+        f"1〜{RUBY_CAP:,}まで指定可能",
         f"**プレイヤーレベルMAX - ¥{menu_price('level_max'):,}**",
         "レベルMAXにします",
         f"**スコア指定 - ¥{menu_price('score'):,}**",
@@ -3456,8 +3479,7 @@ def ticket_request_text(action, val):
         return "プレミアムガチャ完売"
     labels = {
         "coin": "コイン指定",
-        "medal": "メダル指定",
-        "medal_max": "メダルMAX",
+        "ruby": "ルビー指定",
         "score": "スコア指定",
         "exp": "プレイヤーレベルMAX",
         "tsum_lv": "ツムlvMAX",
@@ -3549,6 +3571,7 @@ def ticket_thread_name(action, val):
     labels = {
         "score": "スコア",
         "coin": "コイン",
+        "ruby": "ルビー",
         "exp": "レベルMAX",
     }
     label = labels.get(action, action)
@@ -3817,7 +3840,7 @@ async def create_ticket_and_forge(interaction: discord.Interaction, action, val,
 VALUE_LABELS = {
     "score": ("スコア", "数値（半角）", "例: 3000000"),
     "coin":  ("コイン", "数値（半角）", "例: 100000000"),
-    "medal": ("メダル", "数値（半角）", "例: 500000"),
+    "ruby": ("ルビー", "数値（半角）", "例: 50000"),
 }
 
 class ValueModal(discord.ui.Modal):
@@ -4097,7 +4120,7 @@ class MenuSelect(discord.ui.Select):
             factory = lambda m=menu_msg: AccountBeforeTicketModal("box", DEFAULT_SELECT_BOX_ID, m, "box")
         elif key == "premium":
             factory = lambda m=menu_msg: AccountBeforeTicketModal("gacha_full", DEFAULT_PREMIUM_GACHA_ID, m, "premium")
-        elif key in ("score", "coin", "exp", "medal"):
+        elif key in ("score", "coin", "exp", "ruby"):
             factory = lambda k=key, m=menu_msg: ValueModal(k, m, k)
         elif key == "account":
             await interaction.response.send_modal(AccountInputModal())

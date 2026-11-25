@@ -184,10 +184,14 @@ class OwnedTsumLevelTests(unittest.TestCase):
             {"retcode": 0, "userinfo": {"bmedal": 490000}, "tsuminfo": [{"tsumid": 7, "setflg": 1}]},
             {"retcode": 0, "userinfo": {"bmedal": 490000}, "tsuminfo": [{"tsumid": 7, "setflg": 1}]},
             {"retcode": 0, "userinfo": {"bmedal": 490000}},
+            {"retcode": 0, "userinfo": {"bmedal": 490000}},
+            {"retcode": 0, "userinfo": {"bmedal": 490000}},
+            {"retcode": 0, "userinfo": {"bmedal": 490000}},
         ]
         forge.game_start.return_value = {"retcode": 0, "userinfo": {"playcode": "pc"}}
         forge.game_end.return_value = {"retcode": 0, "userinfo": {"bmedal": 490000}}
-        with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]):
+        with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]), \
+             patch("tsum_bot.time.sleep"):
             result, text = tsum_bot.forge_sync(medal_max=500000, sess={"userid": "test"}, f=forge)
         self.assertIsNone(result)
         self.assertIn("反映を確認できません", text)
@@ -198,8 +202,31 @@ class OwnedTsumLevelTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("1〜500,000", text)
 
+    def test_ruby_value_is_sent_to_game_end(self):
+        forge = Mock()
+        forge.last_http_status = None
+        forge.last_error = None
+        forge.get_info.return_value = {
+            "retcode": 0,
+            "userinfo": {"bruby": 1200},
+            "tsuminfo": [{"tsumid": 7, "setflg": 1, "lv": 1, "getflg": 1}],
+        }
+        forge.game_start.return_value = {"retcode": 0, "userinfo": {"playcode": "pc"}}
+        forge.game_end.return_value = {"retcode": 0, "userinfo": {"bruby": 1234}}
+        with patch.object(tsum_bot, "_cached_event_candidates", return_value=["0"]):
+            result, text = tsum_bot.forge_sync(ruby=34, sess={"userid": "test"}, f=forge)
+        self.assertIsNotNone(result)
+        self.assertEqual(forge.game_end.call_args.kwargs["ruby"], 34)
+        self.assertIn("ルビー", text)
+
 
 class OwnedTsumMenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_menu_actions_use_ruby_instead_of_medal(self):
+        keys = [key for key, _ in tsum_bot.MENU_ACTIONS]
+        self.assertIn("ruby", keys)
+        self.assertNotIn("medal", keys)
+        self.assertNotIn("medal_max", keys)
+
     async def test_menu_opens_free_account_modal_for_all_owned_tsums(self):
         interaction = Mock()
         interaction.response.send_modal = AsyncMock()

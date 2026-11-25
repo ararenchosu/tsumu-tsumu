@@ -368,13 +368,16 @@ class Forge:
                 cand.append(x)
         return cand
 
-    def game_end(self, playcode, score, coin=61, medal=5, exp=120, vanishcnt=None):
-        otherresult = json.dumps({"playlog":{
+    def game_end(self, playcode, score, coin=61, medal=5, ruby=None, exp=120, vanishcnt=None):
+        playlog = {
             "coin":{"inval":[],"cnt":{"1":coin},"key":[1],"sum":str(coin),"req":"ne"},
             "medal":{"inval":[],"cnt":{"1":medal},"ani":{"1":medal},"key":[1],
                      "limit":{"time":"65.042282","ulpm":"70","blem":"0"},"sum":str(medal),"req":"ne"}
-        }}, separators=(",",":"))
-        return self.post("gameEnd.nhn", [
+        }
+        if ruby is not None:
+            playlog["ruby"] = {"inval":[],"cnt":{"1":ruby},"key":[1],"sum":str(ruby),"req":"ne"}
+        otherresult = json.dumps({"playlog": playlog}, separators=(",",":"))
+        payload = [
             ("score",score),("coin",coin),("medal",medal),("exp",exp),
             ("combo","17"),("chain","8"),("treasurecnt","0"),("fever","1"),
             ("skillcnt","0"),("extendflg","0"),
@@ -386,7 +389,10 @@ class Forge:
             ("cheat","0"),("sizecnt","0,89|1,1|2,0|"),
             ("eventpt",""),("boxcnt",""),("genericval",""),
             ("otherresult",otherresult),
-        ])
+        ]
+        if ruby is not None:
+            payload.extend([("ruby", ruby), ("baseruby", ruby)])
+        return self.post("gameEnd.nhn", payload)
 
     def get_info(self):
         return self.post("getInfo.nhn", [])
